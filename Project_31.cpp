@@ -1,59 +1,119 @@
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <semaphore.h>
-#include <fcntl.h>
 
-#define PHILOSOPHERS 5
+#define READCOUNT_KEY 1234
+#define SEM_KEY 5678
 
-void philosopher(int i, sem_t *left_fork, sem_t *right_fork) {
-    while (1) {
-        printf("Philosopher %d is thinking\n", i);
-        sleep(rand() % 3 + 1); // thinking time
-
-        printf("Philosopher %d is hungry\n", i);
-        sem_wait(left_fork);
-        if (sem_trywait(right_fork) == 0) {
-            // Philosopher acquired both forks
-            printf("Philosopher %d is eating\n", i);
-            sleep(rand() % 3 + 1); // eating time
-            sem_post(right_fork);
-        } else {
-            // Philosopher couldn't acquire both forks, release left fork
-            sem_post(left_fork);
+void reader(int semid, int* readcount) {
+    struct sembuf op;
+    while(1) {
+        // Error checking for semop
+        op.sem_num = 0; op.sem_op = -1; op.sem_flg = 0;
+        if (semop(semid, &op, 1) == -1) {
+            perror("semop");
+            exit(1);
         }
 
-        sem_post(left_fork); // release left fork
-        sleep(rand() % 2 + 1); // small delay before thinking again
+        (*readcount)++;
+
+        if (*readcount == 1) {
+            op.sem_num = 1;
+            if (semop(semid, &op, 1) == -1) {
+                perror("semop");
+                exit(1);
+            }
+        }
+
+        op.sem_num = 0; op.sem_op = 1; op.sem_flg = 0;
+        if (semop(semid, &op, 1) == -1) {
+            perror("semop");
+            exit(1);
+        }
+
+        printf("Reading\n");
+
+        op.sem_num = 0; op.sem_op = -1; op.sem_flg = 0;
+        if (semop(semid, &op, 1) == -1) {
+            perror("semop");
+            exit(1);
+        }
+
+        (*readcount)--;
+
+        if (*readcount == 0) {
+            op.sem_num = 1; op.sem_op = 1; op.sem_flg = 0;
+            if (semop(semid, &op, 1) == -1) {
+                perror("semop");
+                exit(1);
+            }
+        }
+
+        op.sem_num = 0; op.sem_op = 1; op.sem_flg = 0;
+        if (semop(semid, &op, 1) == -1) {
+            perror("semop");
+            exit(1);
+        }
     }
 }
 
+void writer(int semid) {
+    struct sembuf op;
+    while(1) {
+        op.sem_num = 1; op.sem_op = -1; op.sem_flg = 0;
+        if (semop(semid, &op, 1) == -1) {
+            perror("semop");
+            exit(1);
+        }
 
-int main() {
-    sem_t *forks[PHILOSOPHERS];
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        char sem_name[10];
-        sprintf(sem_name, "/fork%d", i);
-        forks[i] = sem_open(sem_name, O_CREAT, 0644, 1);
-    }
+        printf("Writing\n");
 
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        if (fork() == 0) {
-            philosopher(i, forks[i], forks[(i + 1) % PHILOSOPHERS]);
-            exit(0);
+        op.sem_num = 1; op.sem_op = 1; op.sem_flg = 0;
+        if (semop(semid, &op, 1) == -1) {
+            perror("semop");
+            exit(1);
         }
     }
+}
 
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        wait(NULL);
+int main() {
+    int shmid = shmget(READCOUNT_KEY, sizeof(int), 0666 | IPC_CREAT);
+    if (shmid == -1) {
+        perror("shmget");
+        exit(1);
     }
 
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        sem_close(forks[i]);
-        char sem_name[10];
-        sprintf(sem_name, "/fork%d", i);
-        sem_unlink(sem_name);
+    int* readcount = (int*) shmat(shmid, 0, 0);
+    if (readcount == (void *) -1) {
+        perror("shmat");
+        exit(1);
+    }
+    *readcount = 0;
+
+    int semid = semget(SEM_KEY, 2, 0666 | IPC_CREAT);
+    if (semid == -1) {
+        perror("semget");
+        exit(1);
+    }
+
+    if (semctl(semid, 0, SETVAL, 1) == -1 || semctl(semid, 1, SETVAL, 1) == -1) {
+        perror("semctl");
+        exit(1);
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("fork");
+        exit(1);
+    }
+
+    if (pid == 0) {
+        reader(semid, readcount);
+    } else {
+        writer(semid);
     }
 
     return 0;
