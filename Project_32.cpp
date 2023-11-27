@@ -1,120 +1,124 @@
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
-#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <semaphore.h>
+#include <sys/wait.h>
 
-#define READCOUNT_KEY 1234
-#define SEM_KEY 5678
+#define SHM_KEY 1234
 
-void reader(int semid, int* readcount) {
-    struct sembuf op;
-    while(1) {
-        // Error checking for semop
-        op.sem_num = 0; op.sem_op = -1; op.sem_flg = 0;
-        if (semop(semid, &op, 1) == -1) {
-            perror("semop");
-            exit(1);
-        }
+struct rw_semaphore {
+    sem_t mutex;
+    sem_t write_lock;
+    int *read_count;
+};
 
-        (*readcount)++;
+void init_rwsem(struct rw_semaphore *rwsem) {
+    sem_init(&rwsem->mutex, 1, 1); // Inicializado con 1 para evitar race conditions en la creación de la memoria compartida
+    sem_init(&rwsem->write_lock, 1, 1); // Inicializado con 1 para evitar race conditions en la creación de la memoria compartida
 
-        if (*readcount == 1) {
-            op.sem_num = 1;
-            if (semop(semid, &op, 1) == -1) {
-                perror("semop");
-                exit(1);
-            }
-        }
+    int shm_id = shmget(SHM_KEY, sizeof(int), IPC_CREAT | 0666);
+    if (shm_id == -1) {
+        perror("shmget");
+        exit(EXIT_FAILURE);
+    }
 
-        op.sem_num = 0; op.sem_op = 1; op.sem_flg = 0;
-        if (semop(semid, &op, 1) == -1) {
-            perror("semop");
-            exit(1);
-        }
+    rwsem->read_count = static_cast<int*>(shmat(shm_id, NULL, 0));
+    if (rwsem->read_count == (int *)-1) {
+        perror("shmat");
+        exit(EXIT_FAILURE);
+    }
 
-        printf("Reading\n");
+    *(rwsem->read_count) = 0;
+}
 
-        op.sem_num = 0; op.sem_op = -1; op.sem_flg = 0;
-        if (semop(semid, &op, 1) == -1) {
-            perror("semop");
-            exit(1);
-        }
+void down_read(struct rw_semaphore *rwsem) {
+    sem_wait(&rwsem->mutex);
+    (*(rwsem->read_count))++;
+    if (*(rwsem->read_count) == 1) {
+        sem_wait(&rwsem->write_lock);
+    }
+    sem_post(&rwsem->mutex);
+}
 
-        (*readcount)--;
+void up_read(struct rw_semaphore *rwsem) {
+    sem_wait(&rwsem->mutex);
+    (*(rwsem->read_count))--;
+    if (*(rwsem->read_count) == 0) {
+        sem_post(&rwsem->write_lock);
+    }
+    sem_post(&rwsem->mutex);
+}
 
-        if (*readcount == 0) {
-            op.sem_num = 1; op.sem_op = 1; op.sem_flg = 0;
-            if (semop(semid, &op, 1) == -1) {
-                perror("semop");
-                exit(1);
-            }
-        }
+void down_write(struct rw_semaphore *rwsem) {
+    sem_wait(&rwsem->write_lock);
+}
 
-        op.sem_num = 0; op.sem_op = 1; op.sem_flg = 0;
-        if (semop(semid, &op, 1) == -1) {
-            perror("semop");
-            exit(1);
-        }
+void up_write(struct rw_semaphore *rwsem) {
+    sem_post(&rwsem->write_lock);
+}
+
+void reader(struct rw_semaphore *rwsem) {
+    while (1) {
+        down_read(rwsem);
+        // Perform reading
+        printf("Reader reading... Read count: %d\n", *(rwsem->read_count));
+        up_read(rwsem);
+        sleep(1);
     }
 }
 
-void writer(int semid) {
-    struct sembuf op;
-    while(1) {
-        op.sem_num = 1; op.sem_op = -1; op.sem_flg = 0;
-        if (semop(semid, &op, 1) == -1) {
-            perror("semop");
-            exit(1);
-        }
-
-        printf("Writing\n");
-
-        op.sem_num = 1; op.sem_op = 1; op.sem_flg = 0;
-        if (semop(semid, &op, 1) == -1) {
-            perror("semop");
-            exit(1);
-        }
+void writer(struct rw_semaphore *rwsem) {
+    while (1) {
+        down_write(rwsem);
+        // Perform writing
+        printf("Writer writing...\n");
+        up_write(rwsem);
+        sleep(1);
     }
 }
 
 int main() {
-    int shmid = shmget(READCOUNT_KEY, sizeof(int), 0666 | IPC_CREAT);
-    if (shmid == -1) {
-        perror("shmget");
-        exit(1);
+    struct rw_semaphore rwsem;
+    init_rwsem(&rwsem);
+
+    pid_t pid;
+
+    // Create reader processes
+    for (int i = 0; i < 3; i++) {
+        pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) { // Child process
+            reader(&rwsem);
+            exit(EXIT_SUCCESS);
+        }
     }
 
-    int* readcount = (int*) shmat(shmid, 0, 0);
-    if (readcount == (void *) -1) {
-        perror("shmat");
-        exit(1);
-    }
-    *readcount = 0;
-
-    int semid = semget(SEM_KEY, 2, 0666 | IPC_CREAT);
-    if (semid == -1) {
-        perror("semget");
-        exit(1);
-    }
-
-    if (semctl(semid, 0, SETVAL, 1) == -1 || semctl(semid, 1, SETVAL, 1) == -1) {
-        perror("semctl");
-        exit(1);
+    // Create writer processes
+    for (int i = 0; i < 2; i++) {
+        pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) { // Child process
+            writer(&rwsem);
+            exit(EXIT_SUCCESS);
+        }
     }
 
-    pid_t pid = fork();
-    if (pid == -1) {
-        perror("fork");
-        exit(1);
+    // Wait for child processes to finish
+
+    for (int i = 0; i < 5; i++) {
+        wait(NULL);
     }
 
-    if (pid == 0) {
-        reader(semid, readcount);
-    } else {
-        writer(semid);
-    }
+    // Detach and remove shared memory
+    shmdt(rwsem.read_count);
+    shmctl(shmget(SHM_KEY, sizeof(int), 0), IPC_RMID, NULL);
 
     return 0;
 }
