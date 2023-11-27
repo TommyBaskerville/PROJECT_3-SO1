@@ -1,33 +1,87 @@
-#include <semaphore.h>
-#include <thread>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <unistd.h>
+#include <stdio.h>
 
-// Definición de los semáforos
-sem_t x, wsem;
+#define READCOUNT_KEY 1234
+#define SEM_KEY 5678
 
-// Definición de semWait
-void semWait(sem_t &sem) {
-    sem_wait(&sem);
+void reader(int semid, int* readcount) {
+    while(1) {
+        // Wait on semaphore
+        struct sembuf op = {0, -1, 0};
+        semop(semid, &op, 1);
+
+        (*readcount)++;
+
+        if (*readcount == 1) {
+            // First reader locks the resource for writers
+            op.sem_num = 1;
+            semop(semid, &op, 1);
+        }
+
+        // Release semaphore
+        op.sem_num = 0;
+        op.sem_op = 1;
+        semop(semid, &op, 1);
+
+        // Read
+        printf("Reading\n");
+
+        // Wait on semaphore
+        op.sem_num = 0;
+        op.sem_op = -1;
+        semop(semid, &op, 1);
+
+        (*readcount)--;
+
+        if (*readcount == 0) {
+            // Last reader unlocks the resource for writers
+            op.sem_num = 1;
+            op.sem_op = 1;
+            semop(semid, &op, 1);
+        }
+
+        // Release semaphore
+        op.sem_num = 0;
+        op.sem_op = 1;
+        semop(semid, &op, 1);
+    }
 }
 
-// Definición de semSignal
-void semSignal(sem_t &sem) {
-    sem_post(&sem);
+void writer(int semid) {
+    while(1) {
+        // Wait on semaphore
+        struct sembuf op = {1, -1, 0};
+        semop(semid, &op, 1);
+
+        // Write
+        printf("Writing\n");
+
+        // Release semaphore
+        op.sem_op = 1;
+        semop(semid, &op, 1);
+    }
 }
 
-// Definición de READUNIT
-void READUNIT() {
-    // Aquí va el código para leer el recurso
-}
+int main() {
+    // Create shared memory for readcount
+    int shmid = shmget(READCOUNT_KEY, sizeof(int), 0666 | IPC_CREAT);
+    int* readcount = (int*) shmat(shmid, 0, 0);
+    *readcount = 0;
 
-// Definición de WRITEUNIT
-void WRITEUNIT() {
-    // Aquí va el código para escribir en el recurso
-}
+    // Create semaphores
+    int semid = semget(SEM_KEY, 2, 0666 | IPC_CREAT);
+    semctl(semid, 0, SETVAL, 1); // x
+    semctl(semid, 1, SETVAL, 1); // wsem
 
-// Definición de parbegin
-void parbegin(void (*reader)(), void (*writer)()) {
-    std::thread t1(reader);
-    std::thread t2(writer);
-    t1.join();
-    t2.join();
+    // Create reader and writer processes
+    if (fork() == 0) {
+        reader(semid, readcount);
+    } else {
+        writer(semid);
+    }
+
+    return 0;
 }
