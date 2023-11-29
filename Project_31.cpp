@@ -4,11 +4,20 @@
 #include <sys/wait.h>
 #include <semaphore.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #define PHILOSOPHERS 5
 
+int running = 1;
+
+void handle_signal(int signal) {
+    if (signal == SIGINT) {
+        running = 0;
+    }
+}
+
 void philosopher(int i, sem_t *left_fork, sem_t *right_fork) {
-    while (1) {
+    while (running) {
         printf("Philosopher %d is thinking\n", i);
         sleep(rand() % 3 + 1); // thinking time
 
@@ -27,11 +36,13 @@ void philosopher(int i, sem_t *left_fork, sem_t *right_fork) {
         sem_post(left_fork); // release left fork
         sleep(rand() % 2 + 1); // small delay before thinking again
     }
+    printf("Philosopher %d stopped\n", i);
 }
-
 
 int main() {
     sem_t *forks[PHILOSOPHERS];
+    signal(SIGINT, handle_signal);
+
     for (int i = 0; i < PHILOSOPHERS; ++i) {
         char sem_name[10];
         sprintf(sem_name, "/fork%d", i);
@@ -45,10 +56,12 @@ int main() {
         }
     }
 
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        wait(NULL);
+    // Esperar a que se reciba la señal SIGINT para finalizar los procesos hijos
+    while (running) {
+        // Se podría realizar alguna tarea aquí si es necesario mientras se espera la señal
     }
 
+    // Cerrar y liberar recursos
     for (int i = 0; i < PHILOSOPHERS; ++i) {
         sem_close(forks[i]);
         char sem_name[10];
