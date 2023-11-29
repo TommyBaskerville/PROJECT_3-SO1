@@ -1,58 +1,73 @@
 #include <stdio.h>
-#include <pthread.h>
-#include <semaphore.h>
 #include <unistd.h>
+#include <semaphore.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+ #include <fcntl.h>
 
 #define N 5
 #define M 10
 
-sem_t barber, customers;
-pthread_mutex_t mutex;
-int waiting = 0;
+struct {
+    sem_t barber;
+    sem_t customers;
+    sem_t mutex;
+    int waiting;
+} *shared;
 
-
-void* barber_function(void* arg) {
+void barber_function() {
     while(1) {
-        sem_wait(&customers);
-        pthread_mutex_lock(&mutex);
-        waiting--;
-        sem_post(&barber);
-        pthread_mutex_unlock(&mutex);
+        sem_wait(&shared->customers);
+        sem_wait(&shared->mutex);
+        shared->waiting--;
+        sem_post(&shared->barber);
+        sem_post(&shared->mutex);
         printf("Barber is cutting hair\n");
         sleep(2);
         printf("Barber finished cutting hair\n");
     }
 }
 
-void* customer_function(void* arg) {
-    pthread_mutex_lock(&mutex);
-    if(waiting < N) {
-        printf("Customer %d entering the shop\n", *(int*)arg);
-        waiting++;
-        sem_post(&customers);
-        pthread_mutex_unlock(&mutex);
-        sem_wait(&barber);
+void customer_function(int i) {
+    sem_wait(&shared->mutex);
+    if(shared->waiting < N) {
+        printf("Customer %d entering the shop\n", i);
+        shared->waiting++;
+        sem_post(&shared->customers);
+        sem_post(&shared->mutex);
+        sem_wait(&shared->barber);
     } else {
-        pthread_mutex_unlock(&mutex);
-        printf("Customer %d leaving, no chairs available\n", *(int*)arg);
+        sem_post(&shared->mutex);
+        printf("Customer %d leaving, no chairs available\n", i);
     }
 }
 
 int main() {
-    pthread_t barber_thread, customer_threads[M];
-    sem_init(&barber, 0, 0);
-    sem_init(&customers, 0, 0);
-    pthread_mutex_init(&mutex, NULL);
 
-    pthread_create(&barber_thread, NULL, barber_function, NULL);
-    int ids[M];
-    for(int i = 0; i < M; i++) {
-        ids[i] = i+1;
-        pthread_create(&customer_threads[i], NULL, customer_function, (void*)&ids[i]);
+    shared = reinterpret_cast<decltype(shared)>(mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+
+    sem_init(&shared->barber, 1, 0);
+    sem_init(&shared->customers, 1, 0);
+    sem_init(&shared->mutex, 1, 1);
+    shared->waiting = 0;
+
+    if (fork() == 0) {
+        barber_function();
+        _exit(0);
     }
 
     for(int i = 0; i < M; i++) {
-        pthread_join(customer_threads[i], NULL);
+        if(fork() == 0) {
+            customer_function(i+1);
+            _exit(0);
+        }
+        sleep(1);
+    }
+
+    for(int i = 0; i < M; i++) {
+        wait(NULL);
     }
 
     return 0;
