@@ -1,59 +1,119 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/wait.h>
 #include <semaphore.h>
-#include <fcntl.h>
+#include <sys/wait.h>
 
-#define PHILOSOPHERS 5
+#define FILE_PATH "sharedfile.txt"
 
-void philosopher(int i, sem_t *left_fork, sem_t *right_fork) {
+struct rw_semaphore {
+    sem_t mutex;
+    sem_t write_lock;
+};
+
+void init_rwsem(struct rw_semaphore *rwsem) {
+    sem_init(&rwsem->mutex, 1, 1); // Mutex para control de acceso a la sección crítica
+    sem_init(&rwsem->write_lock, 1, 1); // Semáforo para bloquear escritura
+}
+
+void down_read(struct rw_semaphore *rwsem) {
+    sem_wait(&rwsem->mutex);
+}
+
+void up_read(struct rw_semaphore *rwsem) {
+    sem_post(&rwsem->mutex);
+}
+
+void down_write(struct rw_semaphore *rwsem) {
+    sem_wait(&rwsem->write_lock);
+}
+
+void up_write(struct rw_semaphore *rwsem) {
+    sem_post(&rwsem->write_lock);
+}
+
+void reader(struct rw_semaphore *rwsem, int id) {
+    FILE *file;
+    char buffer[256];
+
     while (1) {
-        printf("Philosopher %d is thinking\n", i);
-        sleep(rand() % 3 + 1); // thinking time
+        down_read(rwsem);
 
-        printf("Philosopher %d is hungry\n", i);
-        sem_wait(left_fork);
-        if (sem_trywait(right_fork) == 0) {
-            // Philosopher acquired both forks
-            printf("Philosopher %d is eating\n", i);
-            sleep(rand() % 3 + 1); // eating time
-            sem_post(right_fork);
-        } else {
-            // Philosopher couldn't acquire both forks, release left fork
-            sem_post(left_fork);
+        file = fopen(FILE_PATH, "r");
+        if (file == NULL) {
+            perror("Error opening file");
+            exit(EXIT_FAILURE);
         }
 
-        sem_post(left_fork); // release left fork
-        sleep(rand() % 2 + 1); // small delay before thinking again
+        // Leer del archivo
+        while (fgets(buffer, sizeof(buffer), file) != NULL) {
+            printf("Reader %d read: %s", id, buffer);
+        }
+
+        fclose(file);
+
+        up_read(rwsem);
+        sleep(1);
     }
 }
 
+void writer(struct rw_semaphore *rwsem, int id) {
+    FILE *file;
+
+    while (1) {
+        down_write(rwsem);
+
+        file = fopen(FILE_PATH, "a");
+        if (file == NULL) {
+            perror("Error opening file");
+            exit(EXIT_FAILURE);
+        }
+
+        // Escribir en el archivo
+        fprintf(file, "Writer %d wrote.\n", id);
+
+        fclose(file);
+
+        up_write(rwsem);
+        sleep(1);
+    }
+}
 
 int main() {
-    sem_t *forks[PHILOSOPHERS];
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        char sem_name[10];
-        sprintf(sem_name, "/fork%d", i);
-        forks[i] = sem_open(sem_name, O_CREAT, 0644, 1);
-    }
+    struct rw_semaphore rwsem;
+    init_rwsem(&rwsem);
 
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        if (fork() == 0) {
-            philosopher(i, forks[i], forks[(i + 1) % PHILOSOPHERS]);
-            exit(0);
+    pid_t pid;
+    int reader_count = 3;
+    int writer_count = 2;
+
+    // Crear procesos lectores
+    for (int i = 0; i < reader_count; i++) {
+        pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) { // Proceso hijo
+            reader(&rwsem, i + 1);
+            exit(EXIT_SUCCESS);
         }
     }
 
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        wait(NULL);
+    // Crear procesos escritores
+    for (int i = 0; i < writer_count; i++) {
+        pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else if (pid == 0) { // Proceso hijo
+            writer(&rwsem, i + 1);
+            exit(EXIT_SUCCESS);
+        }
     }
 
-    for (int i = 0; i < PHILOSOPHERS; ++i) {
-        sem_close(forks[i]);
-        char sem_name[10];
-        sprintf(sem_name, "/fork%d", i);
-        sem_unlink(sem_name);
+    // Esperar a que los procesos hijos terminen
+    for (int i = 0; i < reader_count + writer_count; i++) {
+        wait(NULL);
     }
 
     return 0;
