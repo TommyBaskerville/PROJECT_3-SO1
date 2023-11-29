@@ -4,8 +4,18 @@
 #include <sys/wait.h>
 #include <semaphore.h>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
+#define FILE_PATH "sharedfile.txt"
 
 #define PHILOSOPHERS 5
+
+#define N 5
+#define M 10
+
+// Codigo del primer programa
 
 void philosopher(int i, sem_t *left_fork, sem_t *right_fork)
 {
@@ -34,9 +44,135 @@ void philosopher(int i, sem_t *left_fork, sem_t *right_fork)
     }
 }
 
-// ... (Código del segundo programa)
+// Codigo del segundo programa
 
-// ... (Código del tercer programa)
+struct rw_semaphore
+{
+    sem_t mutex;
+    sem_t write_lock;
+};
+
+void init_rwsem(struct rw_semaphore *rwsem)
+{
+    sem_init(&rwsem->mutex, 1, 1);      // Mutex para control de acceso a la sección crítica
+    sem_init(&rwsem->write_lock, 1, 1); // Semáforo para bloquear escritura
+}
+
+void down_read(struct rw_semaphore *rwsem)
+{
+    sem_wait(&rwsem->mutex);
+}
+
+void up_read(struct rw_semaphore *rwsem)
+{
+    sem_post(&rwsem->mutex);
+}
+
+void down_write(struct rw_semaphore *rwsem)
+{
+    sem_wait(&rwsem->write_lock);
+}
+
+void up_write(struct rw_semaphore *rwsem)
+{
+    sem_post(&rwsem->write_lock);
+}
+
+void reader(struct rw_semaphore *rwsem, int id)
+{
+    FILE *file;
+    char buffer[256];
+
+    while (1)
+    {
+        down_read(rwsem);
+
+        file = fopen(FILE_PATH, "r");
+        if (file == NULL)
+        {
+            perror("Error opening file");
+            exit(EXIT_FAILURE);
+        }
+
+        // Leer del archivo
+        while (fgets(buffer, sizeof(buffer), file) != NULL)
+        {
+            printf("Reader %d read: %s", id, buffer);
+        }
+
+        fclose(file);
+
+        up_read(rwsem);
+        sleep(1);
+    }
+}
+
+void writer(struct rw_semaphore *rwsem, int id)
+{
+    FILE *file;
+
+    while (1)
+    {
+        down_write(rwsem);
+
+        file = fopen(FILE_PATH, "a");
+        if (file == NULL)
+        {
+            perror("Error opening file");
+            exit(EXIT_FAILURE);
+        }
+
+        // Escribir en el archivo
+        fprintf(file, "Writer %d wrote.\n", id);
+
+        fclose(file);
+
+        up_write(rwsem);
+        sleep(1);
+    }
+}
+
+// Codigo del tercer programa
+struct
+{
+    sem_t barber;
+    sem_t customers;
+    sem_t mutex;
+    int waiting;
+} *shared;
+
+void barber_function()
+{
+    while (1)
+    {
+        sem_wait(&shared->customers);
+        sem_wait(&shared->mutex);
+        shared->waiting--;
+        sem_post(&shared->barber);
+        sem_post(&shared->mutex);
+        printf("Barber is cutting hair\n");
+        sleep(2);
+        printf("Barber finished cutting hair\n");
+    }
+}
+
+void customer_function(int i)
+{
+    sem_wait(&shared->mutex);
+    if (shared->waiting < N)
+    {
+        printf("Customer %d entering the shop\n", i);
+        shared->waiting++;
+        sem_post(&shared->customers);
+        sem_post(&shared->mutex);
+        sem_wait(&shared->barber);
+    }
+    else
+    {
+        sem_post(&shared->mutex);
+        printf("Customer %d leaving, no chairs available\n", i);
+    }
+}
 
 int main()
 {
@@ -89,13 +225,84 @@ int main()
         }
         break;
         case 2:
-            // Ejecutar el código de lectores y escritores con semáforos
-            // Insertar aquí el código del segundo programa
-            break;
+        {
+            struct rw_semaphore rwsem;
+            init_rwsem(&rwsem);
+
+            pid_t pid;
+            int reader_count = 3;
+            int writer_count = 2;
+
+            // Crear procesos lectores
+            for (int i = 0; i < reader_count; i++)
+            {
+                pid = fork();
+                if (pid == -1)
+                {
+                    perror("fork");
+                    exit(EXIT_FAILURE);
+                }
+                else if (pid == 0)
+                { // Proceso hijo
+                    reader(&rwsem, i + 1);
+                    exit(EXIT_SUCCESS);
+                }
+            }
+
+            // Crear procesos escritores
+            for (int i = 0; i < writer_count; i++)
+            {
+                pid = fork();
+                if (pid == -1)
+                {
+                    perror("fork");
+                    exit(EXIT_FAILURE);
+                }
+                else if (pid == 0)
+                { // Proceso hijo
+                    writer(&rwsem, i + 1);
+                    exit(EXIT_SUCCESS);
+                }
+            }
+
+            // Esperar a que los procesos hijos terminen
+            for (int i = 0; i < reader_count + writer_count; i++)
+            {
+                wait(NULL);
+            }
+        }
+        break;
         case 3:
-            // Ejecutar el código del problema del barbero dormilón
-            // Insertar aquí el código del tercer programa
-            break;
+        {
+            shared = reinterpret_cast<decltype(shared)>(mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+
+            sem_init(&shared->barber, 1, 0);
+            sem_init(&shared->customers, 1, 0);
+            sem_init(&shared->mutex, 1, 1);
+            shared->waiting = 0;
+
+            if (fork() == 0)
+            {
+                barber_function();
+                _exit(0);
+            }
+
+            for (int i = 0; i < M; i++)
+            {
+                if (fork() == 0)
+                {
+                    customer_function(i + 1);
+                    _exit(0);
+                }
+                sleep(1);
+            }
+
+            for (int i = 0; i < M; i++)
+            {
+                wait(NULL);
+            }
+        }
+        break;
         case 4:
             printf("Saliendo del menú...\n");
             return 0;
